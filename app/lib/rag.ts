@@ -1,9 +1,8 @@
 import { createHash } from 'node:crypto';
-import { GoogleGenerativeAI, TaskType } from '@google/generative-ai';
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { generateOllamaEmbeddings, getOllamaModels, OllamaError } from './ollama';
 import { MAX_TEXT_CHARS } from './security';
 
-const EMBEDDING_MODEL = 'gemini-embedding-001';
 const CHUNK_SIZE = 1200;
 const CHUNK_OVERLAP = 180;
 const EMBEDDING_BATCH_SIZE = 100;
@@ -87,6 +86,10 @@ export function rankChunks(
   minSimilarity = MIN_SIMILARITY,
   limit = MAX_RESULTS,
 ): string[] {
+  if (!queryEmbedding.length || chunks.some((chunk) => chunk.embedding.length !== queryEmbedding.length)) {
+    throw new OllamaError('PDF and question embeddings have different dimensions. Re-index the PDF with the configured embedding model.', 502);
+  }
+
   return chunks
     .map((chunk) => ({ text: chunk.text, similarity: cosineSimilarity(chunk.embedding, queryEmbedding) }))
     .filter((chunk) => chunk.similarity >= minSimilarity)
@@ -96,15 +99,15 @@ export function rankChunks(
 }
 
 export async function retrievePdfContext(
-  apiKey: string,
   data: Uint8Array,
   question: string,
 ): Promise<string[]> {
-  const hash = createHash('sha256').update(apiKey).update(data).digest('hex');
+  const { embedding: embeddingModel } = getOllamaModels();
+  const hash = createHash('sha256').update(embeddingModel).update(data).digest('hex');
   let indexPromise = indexCache.get(hash);
 
   if (!indexPromise) {
-    indexPromise = createIndex(apiKey, data);
+    indexPromise = createIndex(embeddingModel, data);
     indexCache.set(hash, indexPromise);
     if (indexCache.size > MAX_CACHED_PDFS) {
       const oldest = indexCache.keys().next().value;
@@ -123,32 +126,32 @@ export async function retrievePdfContext(
     throw error;
   }
 
-  const embeddingModel = new GoogleGenerativeAI(apiKey).getGenerativeModel({ model: EMBEDDING_MODEL });
-  const response = await embeddingModel.embedContent({
-    content: { role: 'user', parts: [{ text: question }] },
-    taskType: TaskType.RETRIEVAL_QUERY,
-  });
-  return rankChunks(index, response.embedding.values);
+  const [queryEmbedding] = await generateOllamaEmbeddings(
+    [`task: search_query\nquery: ${question}`],
+    embeddingModel,
+  );
+  return rankChunks(index, queryEmbedding);
 }
 
-async function createIndex(apiKey: string, data: Uint8Array): Promise<VectorChunk[]> {
+async function createIndex(embeddingModel: string, data: Uint8Array): Promise<VectorChunk[]> {
   const text = await extractPdfText(data);
   const textChunks = splitIntoChunks(text);
-  const embeddingModel = new GoogleGenerativeAI(apiKey).getGenerativeModel({ model: EMBEDDING_MODEL });
   const indexed: VectorChunk[] = [];
 
   for (let start = 0; start < textChunks.length; start += EMBEDDING_BATCH_SIZE) {
     const batch = textChunks.slice(start, start + EMBEDDING_BATCH_SIZE);
-    const response = await embeddingModel.batchEmbedContents({
-      requests: batch.map((chunk) => ({
-        content: { role: 'user', parts: [{ text: chunk }] },
-        taskType: TaskType.RETRIEVAL_DOCUMENT,
-      })),
-    });
+    const embeddings = await generateOllamaEmbeddings(
+      batch.map((chunk) => `task: search_document\nquery: ${chunk}`),
+      embeddingModel,
+    );
     indexed.push(...batch.map((chunk, index) => ({
       text: chunk,
-      embedding: response.embeddings[index].values,
+      embedding: embeddings[index],
     })));
+  }
+
+  if (indexed.some((chunk) => chunk.embedding.length !== indexed[0]?.embedding.length)) {
+    throw new OllamaError('Ollama returned PDF embeddings with inconsistent dimensions.', 502);
   }
 
   return indexed;

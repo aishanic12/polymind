@@ -27,6 +27,8 @@ const securityHeaders = [
 ];
 
 const nextConfig = {
+  turbopack: { root: __dirname },
+  serverExternalPackages: ['pdfjs-dist'],
   async headers() {
     return [
       { source: '/:path*', headers: securityHeaders },

@@ -5,7 +5,7 @@ import { useDropzone } from 'react-dropzone';
 import toast from 'react-hot-toast';
 import {
   FileText, Image, Type, Zap, BookOpen, ChevronRight,
-  Copy, Download, RotateCcw, Key, Eye, EyeOff,
+  Copy, Download, RotateCcw,
   Sparkles, GraduationCap, AlignLeft, List, CreditCard,
   X, Upload, ChevronLeft, ChevronRight as ChevronRightIcon,
   Check, Loader2, MessageCircle, SendHorizontal
@@ -38,8 +38,6 @@ export default function Home() {
   const [inputType, setInputType] = useState<InputType>('text');
   const [textInput, setTextInput] = useState('');
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
-  const [apiKey, setApiKey] = useState('');
-  const [showApiKey, setShowApiKey] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [result, setResult] = useState<SummaryResult | null>(null);
   const [currentCard, setCurrentCard] = useState(0);
@@ -120,7 +118,6 @@ export default function Home() {
       const formData = new FormData();
       formData.append('mode', mode);
       formData.append('outputFormat', outputFormat);
-      formData.append('apiKey', apiKey);
 
       if (uploadedFile && inputType !== 'text') {
         formData.append('file', uploadedFile);
@@ -166,7 +163,6 @@ export default function Home() {
     try {
       const formData = new FormData();
       formData.append('messages', JSON.stringify(next.slice(-20)));
-      formData.append('apiKey', apiKey);
       if (hasFileContext && uploadedFile) {
         formData.append('file', uploadedFile);
       } else if (hasTextContext) {
@@ -601,45 +597,7 @@ export default function Home() {
             </div>
             )}
 
-            {/* API Key */}
-            <div>
-              <p className="text-xs font-mono uppercase tracking-wider text-white/30 mb-2 flex items-center gap-1.5">
-                <Key size={10} /> {t.apiKey}
-              </p>
-              <div className="relative">
-                <input
-                  type={showApiKey ? 'text' : 'password'}
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  autoComplete="off"
-                  autoCorrect="off"
-                  autoCapitalize="off"
-                  spellCheck={false}
-                  name="gemini-key"
-                  maxLength={200}
-                  placeholder={t.apiKeyPlaceholder}
-                  className="w-full px-4 py-3 pr-12 rounded-xl text-sm outline-none text-white/70 placeholder:text-white/20 font-mono"
-                  style={{
-                    background: 'rgba(255,255,255,0.03)',
-                    border: '1px solid rgba(255,255,255,0.07)',
-                  }}
-                />
-                <button
-                  onClick={() => setShowApiKey(!showApiKey)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-white/30 hover:text-white/60 transition-colors"
-                >
-                  {showApiKey ? <EyeOff size={15} /> : <Eye size={15} />}
-                </button>
-              </div>
-              <p className="text-[11px] text-white/20 mt-1.5 flex items-center gap-1">
-                <span>{t.getKeyAt}</span>
-                <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer"
-                  className="underline hover:text-white/40 transition-colors" style={{ color: modeColor + '80' }}>
-                  aistudio.google.com
-                </a>
-              </p>
-              <p className="text-[11px] text-white/20 mt-1">{t.keyNote}</p>
-            </div>
+            <p className="text-[11px] text-white/25">{t.localAiNote}</p>
 
             {/* Summarize Button */}
             {mode !== 'chat' && (

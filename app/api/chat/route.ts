@@ -1,13 +1,13 @@
 import { NextRequest } from 'next/server';
-import { GoogleGenerativeAI, type Content, type Part } from '@google/generative-ai';
 import LanguageDetect from 'languagedetect';
 import { RagInputError, retrievePdfContext } from '../../lib/rag';
+import { generateOllamaChat, handleOllamaError, type OllamaMessage } from '../../lib/ollama';
 import {
-  GEMINI_MODEL, MAX_FILE_BYTES, MAX_TEXT_CHARS, ALLOWED_FILE_TYPES, CHAT_RATE_LIMIT,
-  isRateLimited, clientIp, isSameOrigin, looksLikeApiKey, reply, handleGeminiError, formString,
+  MAX_FILE_BYTES, MAX_TEXT_CHARS, ALLOWED_FILE_TYPES, CHAT_RATE_LIMIT,
+  isRateLimited, clientIp, isSameOrigin, reply, formString,
 } from '../../lib/security';
 
-export const maxDuration = 60;
+export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
 
 const MAX_MESSAGES = 20;          // most recent turns kept
@@ -28,7 +28,7 @@ function parseMessages(raw: string): ChatMessage[] | null {
       if (!m || (m.role !== 'user' && m.role !== 'model') || typeof m.content !== 'string') return null;
       const content = m.content.slice(0, MAX_MESSAGE_CHARS).trim();
       if (!content) continue;
-      // Gemini needs alternating roles: merge consecutive messages from the same side.
+      // Ollama chat expects alternating roles, so merge consecutive messages from the same side.
       const last = clean[clean.length - 1];
       if (last && last.role === m.role) last.content += `\n${content}`;
       else clean.push({ role: m.role, content });
@@ -45,23 +45,60 @@ function detectLanguage(text: string): string | null {
   const letterCount = (text.match(/\p{L}/gu) || []).length;
   if (letterCount < 3) return null;
 
-  const teluguLetterCount = (text.match(/\p{Script=Telugu}/gu) || []).length;
-  if (teluguLetterCount / letterCount > 0.5) return 'Telugu';
+  const teluguCount = (text.match(/\p{Script=Telugu}/gu) || []).length;
+  const devanagariCount = (text.match(/\p{Script=Devanagari}/gu) || []).length;
+  if (teluguCount || devanagariCount) {
+    return teluguCount >= devanagariCount ? 'Telugu' : 'Hindi';
+  }
 
   const language = languageDetector.detect(text, 1)[0]?.[0];
   return language ? language[0].toUpperCase() + language.slice(1) : null;
 }
 
+function requestedLanguage(text: string): string | null {
+  const match = text.match(/\b(?:in|using|into)\s+(telugu|hindi|english)\b/i);
+  if (match) return match[1][0].toUpperCase() + match[1].slice(1).toLowerCase();
+
+  if (/(?:తెలుగు|telugu)\s*(?:లో|lo)/i.test(text)) return 'Telugu';
+  if (/(?:హిందీ|हिंदी|हिन्दी|hindi)\s*(?:లో|में|mein|lo)/i.test(text)) return 'Hindi';
+  if (/(?:ఇంగ్లీష్|अंग्रेज़ी|अंग्रेजी|english)\s*(?:లో|में|mein|lo)/i.test(text)) return 'English';
+
+  return null;
+}
+
+function responseLanguage(messages: ChatMessage[]): string | null {
+  const latest = messages[messages.length - 1].content;
+  const requested = requestedLanguage(latest);
+  if (requested) return requested;
+
+  const latestLanguage = detectLanguage(latest);
+  if (latestLanguage === 'Telugu' || latestLanguage === 'Hindi') return latestLanguage;
+
+  for (const message of messages.slice(0, -1).reverse()) {
+    if (message.role !== 'user') continue;
+    const previousRequest = requestedLanguage(message.content);
+    if (previousRequest) return previousRequest;
+    const previousLanguage = detectLanguage(message.content);
+    if (previousLanguage && previousLanguage !== 'English') return previousLanguage;
+  }
+
+  return latestLanguage;
+}
+
 function systemPrompt(
   contextText: string,
   hasFile: boolean,
-  detectedLanguage: string | null,
+  replyLanguage: string | null,
   isPdf: boolean,
   retrievedContext: string[],
 ): string {
+  const languageRule = replyLanguage
+    ? `RESPONSE LANGUAGE: Reply in ${replyLanguage}. This selection comes from the user's script or explicit language request and takes priority over the language of the source content and earlier messages.`
+    : 'RESPONSE LANGUAGE: Identify the language of the latest user message and reply in that language.';
   const rules = `You are PolyMind, a friendly, accurate multilingual assistant.
 
-LANGUAGE (most important rule): A local detector estimates the user's latest message is ${detectedLanguage || 'in an undetermined language'}. Treat that as a hint, not an override: identify the language of the latest message and reply in that same language and script. If the message mixes languages, use the dominant one. If the user writes a language in Roman letters (for example Hinglish or Romanized Telugu), reply the same way. Never switch to English unless the user writes in English.
+${languageRule}
+LANGUAGE QUALITY: Use natural, grammatically correct language and its proper script. Keep widely used technical terms in English when translating them would reduce clarity. Do not mix Telugu and Hindi. Prioritize factual correctness; if unsure, say so rather than inventing details.
 
 STYLE: Be clear and concise. Use short paragraphs, and use • or - bullets when listing. Do not use markdown headings or tables.`;
 
@@ -88,23 +125,13 @@ export async function POST(req: NextRequest) {
     if (!isSameOrigin(req)) return reply({ error: 'Request blocked.' }, 403);
 
     const formData = await req.formData();
-    const userApiKey = formString(formData, 'apiKey').trim();
     const contextText = formString(formData, 'text');
     const fileEntry = formData.get('file');
     const file = fileEntry instanceof File ? fileEntry : null;
 
-    // ── API key: the visitor's own key wins, otherwise the server key ──
-    if (userApiKey && !looksLikeApiKey(userApiKey)) {
-      return reply({ error: 'That does not look like a valid Gemini API key.' }, 400);
-    }
-    const usingServerKey = !userApiKey;
-    const apiKey = userApiKey || process.env.GEMINI_API_KEY || '';
-    if (!apiKey) {
-      return reply({ error: 'No API key provided. Please add your Gemini API key.' }, 400);
-    }
-    if (usingServerKey && isRateLimited('chat', clientIp(req), CHAT_RATE_LIMIT)) {
+    if (isRateLimited('chat', clientIp(req), CHAT_RATE_LIMIT)) {
       return reply(
-        { error: 'Too many requests with the shared key. Please wait a few minutes or add your own Gemini API key.' },
+        { error: 'Too many local model requests. Please wait a few minutes before trying again.' },
         429
       );
     }
@@ -112,7 +139,7 @@ export async function POST(req: NextRequest) {
     // ── Validate input ──
     const messages = parseMessages(formString(formData, 'messages'));
     if (!messages) return reply({ error: 'Please type a message.' }, 400);
-    const detectedLanguage = detectLanguage(messages[messages.length - 1].content);
+    const replyLanguage = responseLanguage(messages);
     if (contextText.length > MAX_TEXT_CHARS) {
       return reply({ error: 'The content is too long. Please shorten it or upload it as a PDF.' }, 413);
     }
@@ -128,7 +155,6 @@ export async function POST(req: NextRequest) {
     if (file && isPdf) {
       try {
         retrievedContext = await retrievePdfContext(
-          apiKey,
           new Uint8Array(await file.arrayBuffer()),
           messages[messages.length - 1].content,
         );
@@ -138,26 +164,23 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── Build the conversation. The file (if any) rides on the first user turn. ──
-    const contents: Content[] = messages.map((m, i) => {
-      const parts: Part[] = [{ text: m.content }];
-      return { role: m.role, parts, _first: i === 0 } as Content & { _first: boolean };
-    });
-    if (file && !isPdf) {
-      const base64Data = Buffer.from(await file.arrayBuffer()).toString('base64');
-      contents[0].parts.unshift({ inlineData: { data: base64Data, mimeType: file.type } });
-    }
-    const cleanContents: Content[] = contents.map(({ role, parts }) => ({ role, parts }));
+    const image = file && !isPdf
+      ? Buffer.from(await file.arrayBuffer()).toString('base64')
+      : undefined;
+    const ollamaMessages: OllamaMessage[] = [
+      {
+        role: 'system',
+        content: systemPrompt(contextText, Boolean(file), replyLanguage, Boolean(isPdf), retrievedContext),
+      },
+      ...messages.map((message, index) => ({
+        role: message.role === 'model' ? 'assistant' as const : 'user' as const,
+        content: message.content,
+        ...(image && index === 0 ? { images: [image] } : {}),
+      })),
+    ];
 
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({
-      model: GEMINI_MODEL,
-      systemInstruction: systemPrompt(contextText, Boolean(file), detectedLanguage, Boolean(isPdf), retrievedContext),
-    });
-
-    const result = await model.generateContent({ contents: cleanContents });
-    return reply({ reply: result.response.text() });
+    return reply({ reply: await generateOllamaChat(ollamaMessages) });
   } catch (error: unknown) {
-    return handleGeminiError(error);
+    return handleOllamaError(error);
   }
 }

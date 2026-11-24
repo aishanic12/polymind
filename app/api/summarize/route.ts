@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { extractPdfText, RagInputError } from '../../lib/rag';
+import { generateOllamaChat, handleOllamaError } from '../../lib/ollama';
 import {
-  GEMINI_MODEL, MAX_FILE_BYTES, MAX_TEXT_CHARS, ALLOWED_FILE_TYPES, SUMMARY_RATE_LIMIT,
-  isRateLimited, clientIp, isSameOrigin, looksLikeApiKey, reply, handleGeminiError, formString,
+  MAX_FILE_BYTES, MAX_TEXT_CHARS, ALLOWED_FILE_TYPES, SUMMARY_RATE_LIMIT,
+  isRateLimited, clientIp, isSameOrigin, reply, formString,
 } from '../../lib/security';
 
-export const maxDuration = 60;
+export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
 
 const ALLOWED_MODES = ['normal', 'exam'];
@@ -112,24 +113,14 @@ export async function POST(req: NextRequest) {
     const formatRaw = str('outputFormat', 'paragraph');
     const mode = ALLOWED_MODES.includes(modeRaw) ? modeRaw : 'normal';
     const outputFormat = ALLOWED_FORMATS.includes(formatRaw) ? formatRaw : 'paragraph';
-    const userApiKey = str('apiKey').trim();
     const language = sanitizeLanguage(str('language', 'auto'));
     const textContent = str('text');
     const fileEntry = formData.get('file');
     const file = fileEntry instanceof File ? fileEntry : null;
 
-    // ── API key: the visitor's own key wins, otherwise the server key ──
-    if (userApiKey && !looksLikeApiKey(userApiKey)) {
-      return reply({ error: 'That does not look like a valid Gemini API key.' }, 400);
-    }
-    const usingServerKey = !userApiKey;
-    const apiKey = userApiKey || process.env.GEMINI_API_KEY || '';
-    if (!apiKey) {
-      return reply({ error: 'No API key provided. Please add your Gemini API key.' }, 400);
-    }
-    if (usingServerKey && isRateLimited('summarize', clientIp(req), SUMMARY_RATE_LIMIT)) {
+    if (isRateLimited('summarize', clientIp(req), SUMMARY_RATE_LIMIT)) {
       return reply(
-        { error: 'Too many requests with the shared key. Please wait a few minutes or add your own Gemini API key.' },
+        { error: 'Too many local model requests. Please wait a few minutes before trying again.' },
         429
       );
     }
@@ -142,36 +133,33 @@ export async function POST(req: NextRequest) {
       return reply({ error: 'File is too large. Maximum size is 10MB.' }, 413);
     }
 
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
-
-    let result;
-
+    let prompt: string;
+    let images: string[] | undefined;
     if (file) {
       if (!ALLOWED_FILE_TYPES.includes(file.type)) {
         return reply({ error: 'Unsupported file type. Please upload a PDF or an image (JPG, PNG, WebP, GIF).' }, 400);
       }
-      const base64Data = Buffer.from(await file.arrayBuffer()).toString('base64');
-      const isPdf = file.type === 'application/pdf';
-      const prompt = buildPrompt(
-        mode,
-        outputFormat,
-        isPdf
-          ? 'the provided PDF document'
-          : 'the provided image — extract all text and visual information from it',
-        language
-      );
-      result = await model.generateContent([
-        prompt,
-        { inlineData: { data: base64Data, mimeType: file.type } },
-      ]);
+      if (file.type === 'application/pdf') {
+        const pdfText = await extractPdfText(new Uint8Array(await file.arrayBuffer()));
+        prompt = buildPrompt(mode, outputFormat, pdfText, language);
+      } else {
+        images = [Buffer.from(await file.arrayBuffer()).toString('base64')];
+        prompt = buildPrompt(
+          mode,
+          outputFormat,
+          'the provided image — extract all text and visual information from it',
+          language,
+        );
+      }
     } else if (textContent.trim()) {
-      result = await model.generateContent(buildPrompt(mode, outputFormat, textContent, language));
+      prompt = buildPrompt(mode, outputFormat, textContent, language);
     } else {
       return reply({ error: 'Please provide text content or upload a file.' }, 400);
     }
 
-    const responseText = result.response.text();
+    const responseText = await generateOllamaChat([
+      { role: 'user', content: prompt, ...(images ? { images } : {}) },
+    ]);
 
     // Parse flashcards if needed
     if (mode === 'exam' && outputFormat === 'flashcards') {
@@ -180,14 +168,30 @@ export async function POST(req: NextRequest) {
           .replace(/```json\n?/g, '')
           .replace(/```\n?/g, '')
           .trim();
-        return reply({ type: 'flashcards', data: JSON.parse(cleaned) });
+        const cards: unknown = JSON.parse(cleaned);
+        if (
+          Array.isArray(cards) &&
+          cards.length > 0 &&
+          cards.every((card) =>
+            card &&
+            typeof card === 'object' &&
+            'front' in card &&
+            typeof card.front === 'string' &&
+            'back' in card &&
+            typeof card.back === 'string'
+          )
+        ) {
+          return reply({ type: 'flashcards', data: cards });
+        }
       } catch {
-        return reply({ type: 'text', data: responseText });
+        // Return the model's text when it does not produce valid flashcard JSON.
       }
+      return reply({ type: 'text', data: responseText });
     }
 
     return reply({ type: outputFormat === 'bullets' ? 'bullets' : 'text', data: responseText });
   } catch (error: unknown) {
-    return handleGeminiError(error);
+    if (error instanceof RagInputError) return reply({ error: error.message }, 400);
+    return handleOllamaError(error);
   }
 }
