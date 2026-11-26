@@ -71,17 +71,6 @@ PolyMind extracts text from text-based PDFs, splits it into overlapping chunks, 
 - Ollama must be running before using chat or summaries.
 - Multiple-choice question generation is not implemented.
 
-## GitHub Pages
-
-The GitHub Pages deployment is an informational static page at
-https://aishanic12.github.io/polymind/. GitHub Pages cannot run the Next.js API routes,
-Ollama chat or embeddings, or server-side PDF extraction. The full interactive application
-remains available when run locally with Ollama; the Pages site does not forward prompts or
-documents to an AI backend.
-
-The `Deploy PolyMind info page` GitHub Actions workflow type-checks and builds the local
-Next.js application, then publishes only the static `docs/` page.
-
 ## License
 
 MIT
