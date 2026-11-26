@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, type ReactNode } from 'react';
 import { useDropzone } from 'react-dropzone';
 import toast from 'react-hot-toast';
 import {
@@ -30,6 +30,106 @@ interface ChatMsg {
 interface SummaryResult {
   type: 'text' | 'bullets' | 'flashcards';
   data: string | Flashcard[];
+}
+
+function renderMarkdown(text: string, accentColor: string): ReactNode {
+  const renderInline = (value: string) => value
+    .split(/(\*\*[^*]+\*\*|`[^`]+`|\*[^*]+\*)/g)
+    .map((part, index) => {
+      if (part.startsWith('**') && part.endsWith('**')) {
+        return <strong key={index} className="font-semibold text-white">{part.slice(2, -2)}</strong>;
+      }
+      if (part.startsWith('`') && part.endsWith('`')) {
+        return <code key={index} className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[0.9em] text-blue-100">{part.slice(1, -1)}</code>;
+      }
+      if (part.startsWith('*') && part.endsWith('*')) {
+        return <em key={index}>{part.slice(1, -1)}</em>;
+      }
+      return <span key={index}>{part}</span>;
+    });
+
+  const lines = text.split('\n');
+  const blocks: ReactNode[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index].trim();
+    if (!line) {
+      index++;
+      continue;
+    }
+
+    if (line.startsWith('```')) {
+      const codeLines: string[] = [];
+      index++;
+      while (index < lines.length && !lines[index].trim().startsWith('```')) {
+        codeLines.push(lines[index]);
+        index++;
+      }
+      if (index < lines.length) index++;
+      blocks.push(
+        <pre key={`code-${index}`} className="overflow-x-auto rounded-xl border border-white/10 bg-black/25 p-4 text-sm leading-relaxed text-white/85">
+          <code>{codeLines.join('\n')}</code>
+        </pre>
+      );
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      const Heading = heading[1].length === 1 ? 'h2' : 'h3';
+      blocks.push(
+        <Heading key={`heading-${index}`} dir="auto" className="mt-4 first:mt-0 font-display font-semibold text-lg" style={{ color: accentColor }}>
+          {renderInline(heading[2].replace(/\s+#+$/, ''))}
+        </Heading>
+      );
+      index++;
+      continue;
+    }
+
+    if (/^(---+|\*\*\*+|___+)$/.test(line)) {
+      blocks.push(<hr key={`rule-${index}`} className="border-white/10" />);
+      index++;
+      continue;
+    }
+
+    const listMatch = line.match(/^(?:[•]|[-*+])\s+(.+)$/) || line.match(/^\d+[.)]\s+(.+)$/);
+    if (listMatch) {
+      const ordered = /^\d+[.)]\s+/.test(line);
+      const items: string[] = [];
+      while (index < lines.length) {
+        const current = lines[index].trim();
+        const match = current.match(/^(?:[•]|[-*+])\s+(.+)$/) || current.match(/^\d+[.)]\s+(.+)$/);
+        if (!match || /^\d+[.)]\s+/.test(current) !== ordered) break;
+        items.push(match[1]);
+        index++;
+      }
+      const List = ordered ? 'ol' : 'ul';
+      blocks.push(
+        <List key={`list-${index}`} dir="auto" className={`${ordered ? 'list-decimal' : 'list-disc'} space-y-1.5 pl-6 text-[15px] leading-relaxed text-white/85 marker:text-blue-300`}>
+          {items.map((item, itemIndex) => <li key={itemIndex}>{renderInline(item)}</li>)}
+        </List>
+      );
+      continue;
+    }
+
+    const paragraph: string[] = [];
+    while (index < lines.length) {
+      const current = lines[index].trim();
+      if (!current || /^#{1,6}\s+/.test(current) || current.startsWith('```') ||
+        /^(?:[•]|[-*+])\s+/.test(current) || /^\d+[.)]\s+/.test(current) ||
+        /^(---+|\*\*\*+|___+)$/.test(current)) break;
+      paragraph.push(current);
+      index++;
+    }
+    blocks.push(
+      <p key={`paragraph-${index}`} dir="auto" className="text-[15px] leading-relaxed text-white/85">
+        {renderInline(paragraph.join(' '))}
+      </p>
+    );
+  }
+
+  return <div className="space-y-3">{blocks}</div>;
 }
 
 export default function Home() {
@@ -190,26 +290,7 @@ export default function Home() {
     }
   };
 
-  // Renders a chat reply: bullets and **bold** only, no raw HTML.
-  const renderChatText = (text: string) =>
-    text.split('\n').filter((l) => l.trim()).map((line, i) => {
-      const trimmed = line.trim();
-      const isBullet = /^[•\-\*]\s+/.test(trimmed);
-      const body = isBullet ? trimmed.replace(/^[•\-\*]\s+/, '') : trimmed;
-      const parts = body.split(/(\*\*[^*]+\*\*)/g).map((part, j) =>
-        part.startsWith('**') && part.endsWith('**') && part.length > 4
-          ? <strong key={j} className="font-semibold text-white">{part.slice(2, -2)}</strong>
-          : <span key={j}>{part}</span>
-      );
-      return isBullet ? (
-        <div key={i} className="flex gap-2.5">
-          <span className="mt-1 shrink-0 text-xs" style={{ color: modeColor }}>▸</span>
-          <p dir="auto" className="text-[15px] leading-relaxed text-white/85">{parts}</p>
-        </div>
-      ) : (
-        <p key={i} dir="auto" className="text-[15px] leading-relaxed text-white/85">{parts}</p>
-      );
-    });
+  const renderChatText = (text: string) => renderMarkdown(text, modeColor);
 
   const handleCopy = async () => {
     let text = '';
@@ -266,8 +347,8 @@ export default function Home() {
     });
   };
 
-  const modeColor = mode === 'exam' ? '#00D4AA' : mode === 'chat' ? '#8B7CFF' : '#F5C842';
-  const modeGlow = mode === 'exam' ? 'rgba(0,212,170,0.2)' : mode === 'chat' ? 'rgba(139,124,255,0.2)' : 'rgba(245,200,66,0.2)';
+  const modeColor = mode === 'exam' ? '#43C6B3' : mode === 'chat' ? '#A99BFF' : '#88A7FF';
+  const modeGlow = mode === 'exam' ? 'rgba(67,198,179,0.18)' : mode === 'chat' ? 'rgba(169,155,255,0.18)' : 'rgba(136,167,255,0.18)';
 
   const renderResult = () => {
     if (!result) return null;
@@ -384,75 +465,88 @@ export default function Home() {
 
     // Text / bullets output
     const text = result.data as string;
-    const lines = text.split('\n').filter(l => l.trim());
-
-    return (
-      <div className="output-content space-y-2">
-        {lines.map((line, i) => {
-          const isBullet = line.trim().startsWith('•') || line.trim().startsWith('-') || line.trim().startsWith('*');
-          const isHeader = line.trim().startsWith('**') && line.trim().endsWith('**');
-          const isSubBullet = line.trim().startsWith('-') || line.trim().startsWith('  ');
-
-          if (isHeader) {
-            const headerText = line.replace(/\*\*/g, '').trim();
-            return (
-              <h3 key={i} dir="auto" className="font-display font-semibold text-base mt-6 mb-2 first:mt-0" style={{ color: modeColor }}>
-                {headerText}
-              </h3>
-            );
-          }
-
-          if (isBullet || isSubBullet) {
-            const bulletText = line.replace(/^[•\-\*]\s*/, '').trim();
-            return (
-              <div key={i} className={`flex gap-3 ${isSubBullet && !isBullet ? 'ml-4' : ''}`}>
-                <span className="mt-1 shrink-0 text-xs" style={{ color: modeColor }}>▸</span>
-                <p dir="auto" className="text-[15px] leading-relaxed text-white/85">{bulletText}</p>
-              </div>
-            );
-          }
-
-          return (
-            <p key={i} dir="auto" className="text-[15px] leading-relaxed text-white/85">
-              {line}
-            </p>
-          );
-        })}
-      </div>
-    );
+    return <div className="output-content">{renderMarkdown(text, modeColor)}</div>;
   };
 
   return (
-    <div className="min-h-screen" style={{ background: '#0A0A0F' }}>
-      {/* Background gradient blobs */}
-      <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div
-          className="absolute top-[-20%] left-[-10%] w-[600px] h-[600px] rounded-full opacity-[0.06]"
-          style={{ background: `radial-gradient(circle, ${modeColor}, transparent)`, transition: 'background 0.5s' }}
-        />
-        <div
-          className="absolute bottom-[-20%] right-[-10%] w-[500px] h-[500px] rounded-full opacity-[0.04]"
-          style={{ background: `radial-gradient(circle, ${modeColor}, transparent)`, transition: 'background 0.5s' }}
-        />
-        <div className="absolute top-[40%] left-[50%] w-[300px] h-[300px] rounded-full opacity-[0.03]"
-          style={{ background: 'radial-gradient(circle, #FF4D6D, transparent)' }}
-        />
-      </div>
+    <div className="pm-app min-h-screen">
+      <div className="pm-layout">
+        <aside className="pm-sidebar" aria-label="PolyMind navigation">
+          <a className="pm-brand" href="#workspace" aria-label={APP_NAME_PARTS.join('')}>
+            <span className="pm-brand-mark"><Sparkles size={19} /></span>
+            <span className="pm-brand-name">
+              <span>{APP_NAME_PARTS[0]}</span><strong>{APP_NAME_PARTS[1]}</strong>
+            </span>
+          </a>
 
-      <div className="relative z-10 max-w-5xl mx-auto px-4 py-8 md:py-12">
-        {/* Header */}
-        <div className="text-center mb-12 animate-slide-up">
-          <h1 className="text-5xl md:text-7xl font-display font-bold tracking-tight mb-3">
-            <span className="text-white">{APP_NAME_PARTS[0]}</span>
-            <span style={{ color: modeColor, textShadow: `0 0 40px ${modeGlow}`, transition: 'color 0.4s, text-shadow 0.4s' }}>{APP_NAME_PARTS[1]}</span>
-          </h1>
-          <p className="text-white/40 text-lg max-w-md mx-auto font-body">
-            {t.tagline}
-          </p>
-        </div>
+          <div className="pm-nav-section">
+            <nav className="pm-nav">
+              <button className={`pm-nav-item ${mode === 'normal' ? 'active' : ''}`} onClick={() => handleModeChange('normal')}>
+                <Sparkles size={17} /> <span>{t.normal}</span>
+              </button>
+              <button className={`pm-nav-item ${mode === 'chat' && inputType !== 'pdf' ? 'active' : ''}`} onClick={() => handleModeChange('chat')}>
+                <MessageCircle size={17} /> <span>{t.chat}</span>
+              </button>
+              <button className={`pm-nav-item ${inputType === 'pdf' ? 'active' : ''}`} onClick={() => { setInputType('pdf'); handleModeChange('chat'); }}>
+                <FileText size={17} /> <span>{t.pdf}</span>
+              </button>
+              <button className={`pm-nav-item ${mode === 'exam' ? 'active' : ''}`} onClick={() => handleModeChange('exam')}>
+                <GraduationCap size={17} /> <span>{t.exam}</span>
+              </button>
+            </nav>
+          </div>
+
+          <div className="pm-sidebar-bottom">
+            <div className="pm-local-card">
+              <span className="pm-status-dot" />
+              <div><strong>Local AI</strong><small>{t.localAiNote}</small></div>
+            </div>
+            <p className="pm-sidebar-caption">{t.footer}</p>
+          </div>
+        </aside>
+
+        <main className="pm-main" id="workspace">
+          <div className="pm-topbar">
+            <div className="pm-breadcrumb"><span>PolyMind</span><ChevronRight size={14} /><strong>{mode === 'chat' ? t.chat : mode === 'exam' ? t.exam : t.normal}</strong></div>
+            <div className="pm-local-badge"><span className="pm-status-dot" /> {t.localAiNote}</div>
+          </div>
+
+          <div className="pm-content w-full max-w-[1440px] mx-auto px-5 py-7 md:px-10 md:py-9">
+            <section className="pm-welcome animate-slide-up">
+              <div>
+                <p className="pm-eyebrow">{t.normalDesc}</p>
+                <h1>{t.tagline}</h1>
+                <p className="pm-welcome-copy">{t.localAiNote}</p>
+              </div>
+              <div className="pm-welcome-mark" aria-hidden="true"><BookOpen size={34} /></div>
+            </section>
+
+            <section className="pm-quick-actions" aria-label="Quick actions">
+              <button className="pm-quick-card" onClick={() => handleModeChange('chat')}>
+                <span className="pm-quick-icon blue"><MessageCircle size={18} /></span>
+                <span><strong>{t.chat}</strong><small>{t.chatDesc}</small></span><ChevronRight size={16} />
+              </button>
+              <button className="pm-quick-card" onClick={() => { setInputType('pdf'); handleModeChange('chat'); }}>
+                <span className="pm-quick-icon teal"><Upload size={18} /></span>
+                <span><strong>{t.pdf}</strong><small>{fmt(t.dropYour, { type: t.pdf })}</small></span><ChevronRight size={16} />
+              </button>
+              <button className="pm-quick-card" onClick={() => { setOutputFormat('paragraph'); handleModeChange('normal'); }}>
+                <span className="pm-quick-icon violet"><AlignLeft size={18} /></span>
+                <span><strong>{t.summarizeNow}</strong><small>{t.normalDesc}</small></span><ChevronRight size={16} />
+              </button>
+              <button className="pm-quick-card" onClick={() => { setOutputFormat('flashcards'); handleModeChange('exam'); }}>
+                <span className="pm-quick-icon amber"><CreditCard size={18} /></span>
+                <span><strong>{t.flashcards}</strong><small>{t.examDesc}</small></span><ChevronRight size={16} />
+              </button>
+            </section>
 
         {/* Mode Toggle */}
-        <div className="flex justify-center mb-8">
+        <div className="pm-mode-section">
+          <div className="pm-section-heading">
+            <div><p className="pm-eyebrow">{t.examDesc}</p><h2>{t.tagline}</h2></div>
+            <span className="pm-workspace-hint"><span className="pm-status-dot" /> {t.localAiNote}</span>
+          </div>
+        <div className="flex justify-center mb-6">
           <div className="relative flex p-1 rounded-2xl gap-1" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.07)' }}>
             {[
               { id: 'normal', label: t.normal, icon: Sparkles, desc: t.normalDesc },
@@ -481,9 +575,9 @@ export default function Home() {
           </div>
         </div>
 
-        <div className="grid md:grid-cols-2 gap-6">
+        <div className="grid md:grid-cols-2 gap-5 pm-workspace-grid">
           {/* LEFT COLUMN: Input */}
-          <div className="space-y-4">
+          <div className="space-y-4 pm-input-panel">
             {mode === 'chat' && (
               <p className="text-xs font-mono uppercase tracking-wider text-white/30">{t.contextLabel}</p>
             )}
@@ -633,6 +727,7 @@ export default function Home() {
             {mode === 'chat' ? (
               <div
                 className="rounded-2xl overflow-hidden h-full min-h-[520px] flex flex-col"
+                data-testid="chat-panel"
                 style={{ background: 'rgba(255,255,255,0.02)', border: `1px solid ${modeColor}25`, transition: 'border-color 0.4s' }}
               >
                 {/* Chat header */}
@@ -753,6 +848,7 @@ export default function Home() {
             ) : (
             <div
               className="rounded-2xl overflow-hidden h-full min-h-[520px] flex flex-col"
+              data-testid="study-output-panel"
               style={{
                 background: 'rgba(255,255,255,0.02)',
                 border: result ? `1px solid ${modeColor}25` : '1px solid rgba(255,255,255,0.06)',
@@ -874,13 +970,16 @@ export default function Home() {
             )}
           </div>
         </div>
+        </div>
 
         {/* Footer */}
-        <div className="mt-10 text-center">
+        <div className="pm-footer">
           <p className="text-xs text-white/15 font-mono">
             {t.footer}
           </p>
         </div>
+      </div>
+      </main>
       </div>
 
       <style jsx>{`
